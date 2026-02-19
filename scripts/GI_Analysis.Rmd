@@ -1,0 +1,106 @@
+---
+title: "Gastric Cancer - malignant ascites study"
+subtitle: "GSE228598 scRNA-seq Analysis"
+author: "Aymen Maqsood"
+date: "2026-02-18"
+output: html_document
+---
+                                                                                                                                                                 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+# Setup
+
+library(Seurat)
+library(harmony)
+library(ggplot2)
+library(dplyr)
+set.seed(123)
+
+mt_max <- 20
+nfeature_min <- 200
+nfeature_max <- 6000
+ncount_min <- 500
+ncount_max <- 40000
+cluster_res <- 0.8
+
+m2ts_genes <- c("MRC1","MS4A4A","CD36","CCL13","CCL18","CCL23","SLC38A6","FGL2","FN1","MAF")
+m1ts_genes <- c("CCR7","IL2RA","CXCL11","CCL19","CXCL10","PLA1A","PTX3")
+ctlts_genes <- c("GZMA","GZMB","GZMH","GZMM","PRF1")
+```
+
+
+# Download data 
+
+```{r Data loading, include=FALSE}
+
+geo_dir <- "data/geo"
+supp_url <- "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE228598&format=file"
+tar_file <- file.path(geo_dir, "GSE228598_RAW.tar")
+
+if (!file.exists(tar_file)) {
+  download.file(supp_url, tar_file, mode = "wb")
+}
+
+extracted <- list.files(geo_dir, pattern = "\\.gz$")
+if (length(extracted) == 0) {
+  untar(tar_file, exdir = geo_dir)
+}
+
+list.files(geo_dir, pattern = "\\.gz$") |> head(20)
+``` 
+
+
+# Load and merge samples
+
+```{r}
+gz_files <- list.files(geo_dir, pattern = "barcodes\\.tsv\\.gz$", full.names = TRUE)
+sample_ids <- sub(".*_(P\\d+)_barcodes.*", "\\1", basename(gz_files))
+
+obj_list <- lapply(seq_along(sample_ids), function(i) {
+  sample_dir <- file.path(geo_dir, sample_ids[i])
+  dir.create(sample_dir, showWarnings = FALSE)
+
+  prefix <- sub("_barcodes\\.tsv\\.gz$", "_", basename(gz_files[i]))
+  for (suffix in c("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")) {
+    src <- file.path(geo_dir, paste0(prefix, suffix))
+    dst <- file.path(sample_dir, suffix)
+    if (!file.exists(dst)) file.copy(src, dst)
+  }
+
+  counts <- Read10X(sample_dir)
+  obj <- CreateSeuratObject(counts, project = sample_ids[i], min.cells = 3, min.features = 200)
+  obj$sample <- sample_ids[i]
+  obj
+})
+
+names(obj_list) <- sample_ids
+merged <- merge(obj_list[[1]], obj_list[-1], add.cell.ids = sample_ids)
+merged
+
+rm(obj_list)
+gc()
+
+```
+
+# QC 
+```{r, fig.width=12, fig.height=4}                                                                                                                                 
+merged[["percent.mt"]] <- PercentageFeatureSet(merged, pattern = "^MT-")                                                                                           
+                                                                                                                                                                   
+VlnPlot(merged, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+        group.by = "sample", pt.size = 0, ncol = 3) &
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}                           
+
+summary(merged$nCount_RNA)
+quantile(merged$nCount_RNA, c(0.01, 0.05, 0.5, 0.95, 0.99, 1.0))                                    
+                        
+```
+
+
+
+
+
