@@ -4,11 +4,11 @@ Reproducing and extending the scRNA-seq analysis from [Sullivan et al. 2024](htt
 
 ## Data
 
-GSE228598 — 10 patient samples from peritoneal fluid, 10x Chromium scRNA-seq. Downloaded directly from GEO by the Rmd scripts.
+GSE228598 — 10 patient samples from peritoneal fluid, 10x Chromium scRNA-seq.
 
 ## Analysis
 
-**Part 1** (`scripts/GI_Analysis.Rmd`) — QC, doublet removal (scDblFinder), Harmony integration, broad compartment annotation, macrophage subset with CD68+CD163+ M2 flagging, Sullivan et al. module scoring (M2TS/M1TS/CTLTS), and Azimuth PBMC reference mapping.
+**Part 1** (`scripts/GI_Analysis.Rmd`) — QC, doublet removal (scDblFinder), Harmony integration, broad compartment annotation, macrophage subset with CD68+CD163+ M2 flagging, module scoring (M2TS/M1TS/CTLTS), and Azimuth PBMC reference mapping.
 
 **Part 2** (`scripts/Downstream analysis.Rmd`) — CellChat cell-cell communication inference (triMean), immunosuppressive pathway analysis (MIF, SPP1, GALECTIN, CCL, FN1), sender-receiver heatmaps, ligand-receptor bubble plots.
 
