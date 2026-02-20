@@ -1,22 +1,37 @@
 ---
 title: "Gastric Cancer - malignant ascites study"
-subtitle: "GSE228598 scRNA-seq Analysis"
+subtitle: "GSE228598 scRNA-seq Analysis Part 1 - QC and preprocessing"
 author: "Aymen Maqsood"
-date: "2026-02-18"
-output: html_document
+date: "2026-02-19"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
 ---
-                                                                                                                                                                 
+
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
 
-# Setup
+## Setup
 
+```{r load_libraries, warning=FALSE, message=FALSE}
+
+##############################
+###        SETUP           ###
+##############################
+
+# Loading required libraries
 library(Seurat)
 library(harmony)
+library(scDblFinder)
 library(ggplot2)
 library(dplyr)
-set.seed(123)
+set.seed(1)
 
+options(future.globals.maxSize = 3 * 1024^3)
+
+# QC thresholds initial
 mt_max <- 20
 nfeature_min <- 200
 nfeature_max <- 6000
@@ -24,15 +39,25 @@ ncount_min <- 500
 ncount_max <- 40000
 cluster_res <- 0.8
 
+# S gene signatures from paper (sullivan et al. 2024)
 m2ts_genes <- c("MRC1","MS4A4A","CD36","CCL13","CCL18","CCL23","SLC38A6","FGL2","FN1","MAF")
 m1ts_genes <- c("CCR7","IL2RA","CXCL11","CCL19","CXCL10","PLA1A","PTX3")
 ctlts_genes <- c("GZMA","GZMB","GZMH","GZMM","PRF1")
+
+dir.create("data_processed", showWarnings = FALSE)
+dir.create("tables", showWarnings = FALSE)
+dir.create("figures", showWarnings = FALSE)
 ```
 
+## Data Download
 
-# Download data 
+Downloading the 10x matrices for GSE228598 from GEO. 10 of the 28 samples from the paper were publicly available.
 
-```{r Data loading, include=FALSE}
+```{r data_download, warning=FALSE, message=FALSE}
+
+##############################
+###    DATA DOWNLOAD       ###
+##############################
 
 geo_dir <- "data/geo"
 supp_url <- "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE228598&format=file"
@@ -46,14 +71,19 @@ extracted <- list.files(geo_dir, pattern = "\\.gz$")
 if (length(extracted) == 0) {
   untar(tar_file, exdir = geo_dir)
 }
+```
 
-list.files(geo_dir, pattern = "\\.gz$") |> head(20)
-``` 
+## Load and Merge
 
+merge into one Seurat object.
 
-# Load and merge samples
+```{r load_merge, warning=FALSE, message=FALSE}
 
-```{r}
+##############################
+###    LOAD & MERGE        ###
+##############################
+
+# Reorganizing 10x triplets into per-sample dirs for Read10X
 gz_files <- list.files(geo_dir, pattern = "barcodes\\.tsv\\.gz$", full.names = TRUE)
 sample_ids <- sub(".*_(P\\d+)_barcodes.*", "\\1", basename(gz_files))
 
@@ -76,31 +106,340 @@ obj_list <- lapply(seq_along(sample_ids), function(i) {
 
 names(obj_list) <- sample_ids
 merged <- merge(obj_list[[1]], obj_list[-1], add.cell.ids = sample_ids)
-merged
 
 rm(obj_list)
 gc()
-
 ```
 
-# QC 
-```{r, fig.width=12, fig.height=4}                                                                                                                                 
-merged[["percent.mt"]] <- PercentageFeatureSet(merged, pattern = "^MT-")                                                                                           
-                                                                                                                                                                   
+## Quality Control
+
+```{r qc_violins, warning=FALSE, message=FALSE, fig.width=12, fig.height=4}
+
+##############################
+###    QUALITY CONTROL     ###
+##############################
+
+# Computing mito percentage
+merged[["percent.mt"]] <- PercentageFeatureSet(merged, pattern = "^MT-")
+
+# QC violin plots
 VlnPlot(merged, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
         group.by = "sample", pt.size = 0, ncol = 3) &
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
+nCount has extreme outliers (max ~187M UMIs) that affect the violin. Capping at 50k to see the real distribution:
 
-```{r}                           
+```{r qc_violin_capped, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
 
-summary(merged$nCount_RNA)
-quantile(merged$nCount_RNA, c(0.01, 0.05, 0.5, 0.95, 0.99, 1.0))                                    
-                        
+# Capped violin for UMI distribution
+VlnPlot(merged, features = "nCount_RNA", group.by = "sample", pt.size = 0) +
+  ylim(0, 50000) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
+Bulk of cells sit between 1k-10k UMIs with reasonable mito fractions. Applying standard cutoffs:
 
+```{r qc_filter, warning=FALSE, message=FALSE}
 
+# Applying QC filters
+merged <- subset(merged,
+  nFeature_RNA > nfeature_min & nFeature_RNA < nfeature_max &
+  nCount_RNA > ncount_min & nCount_RNA < ncount_max &
+  percent.mt < mt_max)
 
+cat("After QC:", ncol(merged), "cells,", nrow(merged), "genes\n")
+table(merged$sample)
+```
 
+## Doublet Removal
+
+Running scDblFinder per sample. Peritoneal fluid loaded at standard 10x density should give ~5-10% doublet rates.
+
+```{r doublet_removal, warning=FALSE, message=FALSE}
+
+##############################
+###   DOUBLET REMOVAL      ###
+##############################
+
+merged <- JoinLayers(merged)
+sce <- as.SingleCellExperiment(merged)
+sce <- scDblFinder(sce, samples = "sample")
+
+merged$doublet_class <- sce$scDblFinder.class
+merged$doublet_score <- sce$scDblFinder.score
+
+table(merged$doublet_class, merged$sample)
+
+merged <- subset(merged, doublet_class == "singlet")
+cat("After doublet removal:", ncol(merged), "cells\n")
+
+rm(sce)
+gc()
+```
+
+## Normalize and Integrate
+
+Using LogNormalize + Harmony for batch correction across the 10 patient samples.
+
+Tried SCTransform but hit the 16GB memory limit Lol, and the paper used standard normalization anyway so proceeding with that
+
+```{r normalize_integrate, warning=FALSE, message=FALSE}
+
+##############################
+###   NORMALIZATION &      ###
+###   INTEGRATION          ###
+##############################
+
+# Saving QC checkpoint
+saveRDS(merged, "data_processed/gse228598_merged_qc.rds")
+
+# Standard log-normalization pipeline
+merged <- NormalizeData(merged)
+merged <- FindVariableFeatures(merged, nfeatures = 2000)
+merged <- ScaleData(merged)
+merged <- RunPCA(merged, verbose = FALSE)
+
+# Harmony batch correction
+merged <- RunHarmony(merged, group.by.vars = "sample", reduction = "pca", reduction.save = "harmony")
+merged <- RunUMAP(merged, reduction = "harmony", dims = 1:30, verbose = FALSE)
+merged <- FindNeighbors(merged, reduction = "harmony", dims = 1:30, verbose = FALSE)
+merged <- FindClusters(merged, resolution = cluster_res, verbose = FALSE)
+```
+
+```{r umap_clusters, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+# UMAP colored by cluster and by sample
+p1 <- DimPlot(merged, reduction = "umap", group.by = "seurat_clusters", label = TRUE) + NoLegend()
+p2 <- DimPlot(merged, reduction = "umap", group.by = "sample")
+p1 + p2
+
+ggsave("figures/umap_harmony_clusters.png", p1 + p2, width = 10, height = 4)
+```
+
+Samples mix well in the central mass, Harmony did its job like always, long live korsunsky lab. Isolated clusters on the right are patient-enriched, likely epithelial/mesothelial populations.
+
+## Broad Compartment Annotation
+
+Assigning clusters to compartments using  canonical marker expression.
+
+```{r marker_dotplot, warning=FALSE, message=FALSE, fig.width=12, fig.height=5}
+
+##############################
+###   COMPARTMENT          ###
+###   ANNOTATION           ###
+##############################
+
+broad_markers <- c(
+  "PTPRC",
+  "CD3D", "CD3E", "NKG7",
+  "CD79A", "MS4A1", "MZB1", "JCHAIN",
+  "CD14", "CD68", "LYZ", "FCGR3A",
+  "EPCAM", "KRT18", "KRT19",
+  "PECAM1", "VWF",
+  "COL1A1", "DCN",
+  "MSLN", "CALB2"
+)
+
+DotPlot(merged, features = broad_markers, cluster.idents = TRUE) +
+  RotatedAxis()
+```
+
+```{r assign_compartments, warning=FALSE, message=FALSE}
+
+# Mapping clusters to broad compartments
+compartment_map <- c(
+  "0" = "Myeloid", "1" = "Myeloid", "3" = "Myeloid", "4" = "Myeloid",
+  "8" = "Myeloid", "12" = "Myeloid", "14" = "Myeloid", "22" = "Myeloid",
+  "2" = "T/NK", "5" = "T/NK", "6" = "T/NK", "7" = "T/NK",
+  "9" = "T/NK", "17" = "T/NK", "18" = "T/NK", "19" = "T/NK", "21" = "T/NK",
+  "11" = "B cell", "15" = "Plasma",
+  "13" = "Epithelial", "16" = "Epithelial", "20" = "Epithelial",
+  "10" = "Mesothelial", "23" = "Mesothelial"
+)
+
+merged$compartment <- unname(compartment_map[as.character(merged$seurat_clusters)])
+table(merged$compartment)
+```
+
+```{r umap_compartments, warning=FALSE, message=FALSE, fig.width=6, fig.height=5}
+
+DimPlot(merged, group.by = "compartment", label = TRUE) + NoLegend()
+ggsave("figures/umap_broad_compartments.png", width = 6, height = 5)
+```
+
+Myeloid cells dominate (~57%), consistent with peritoneal fluid being macrophage-rich. T/NK is the second largest population (~34%). Epithelial and mesothelial are minor components, mostly patient-specific.
+
+```{r export_counts, warning=FALSE, message=FALSE}
+
+# Exporting cell counts
+write.csv(as.data.frame.matrix(table(merged$sample, merged$compartment)),
+          "tables/broad_compartment_counts.csv")
+write.csv(table(merged$sample, merged$compartment), "tables/cell_counts_by_sample.csv")
+```
+
+## Macrophage Subset
+
+Subsetting the myeloid compartment, re-clustering, and flagging M2 macrophages as CD68+CD163+ per Sullivan et al.
+
+```{r macrophage_subset, warning=FALSE, message=FALSE}
+
+##############################
+###   MACROPHAGE SUBSET    ###
+##############################
+
+macrophages <- subset(merged, compartment == "Myeloid")
+macrophages <- NormalizeData(macrophages)
+macrophages <- FindVariableFeatures(macrophages, nfeatures = 2000)
+macrophages <- ScaleData(macrophages)
+macrophages <- RunPCA(macrophages, verbose = FALSE)
+macrophages <- RunHarmony(macrophages, group.by.vars = "sample", reduction = "pca", reduction.save = "harmony")
+macrophages <- RunUMAP(macrophages, reduction = "harmony", dims = 1:20, verbose = FALSE)
+macrophages <- FindNeighbors(macrophages, reduction = "harmony", dims = 1:20, verbose = FALSE)
+macrophages <- FindClusters(macrophages, resolution = 0.6, verbose = FALSE)
+
+# Flagging CD68+CD163+ M2 macrophages
+cd68_expr <- GetAssayData(macrophages, layer = "data")["CD68", ]
+cd163_expr <- GetAssayData(macrophages, layer = "data")["CD163", ]
+macrophages$m2_flag <- ifelse(cd68_expr > 0 & cd163_expr > 0, "CD68+CD163+", "Other")
+
+table(macrophages$m2_flag)
+```
+
+```{r macrophage_umap, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+p1 <- DimPlot(macrophages, label = TRUE) + NoLegend() + ggtitle("Myeloid clusters")
+p2 <- DimPlot(macrophages, group.by = "m2_flag") + ggtitle("CD68+CD163+ M2")
+p1 + p2
+```
+
+~56% of myeloid cells are CD68+CD163+. They show spatial structure on the UMAP rather than random scattering -- consistent with the paper's finding that M2 polarization exists as a continuum, not a binary state.
+
+## Module Scores
+
+Scoring all macrophages for the three Sullivan et al. signatures.
+
+```{r module_scores, warning=FALSE, message=FALSE}
+
+##############################
+###    MODULE SCORES       ###
+##############################
+
+macrophages <- AddModuleScore(macrophages, features = list(m2ts_genes), name = "M2TS")
+macrophages <- AddModuleScore(macrophages, features = list(m1ts_genes), name = "M1TS")
+macrophages <- AddModuleScore(macrophages, features = list(ctlts_genes), name = "CTLTS")
+
+saveRDS(macrophages, "data_processed/gse228598_macrophages.rds")
+```
+
+```{r module_featureplot, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+
+FeaturePlot(macrophages, features = c("M2TS1", "M1TS1", "CTLTS1"), ncol = 3, order = TRUE) &
+  scale_color_viridis_c()
+ggsave("figures/umap_m2ts_macrophage_subset.png", width = 10, height = 4)
+```
+
+```{r module_violin, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
+
+VlnPlot(macrophages, features = "M2TS1", group.by = "m2_flag", pt.size = 0) +
+  ggtitle("M2TS score by CD68+CD163+ status")
+ggsave("figures/violin_m2ts_by_m2flag.png", width = 6, height = 4)
+```
+
+M2TS is enriched in CD68+CD163+ cells relative to other myeloid cells, replicating the paper's core finding (their Figure 3A). M1TS and CTLTS are expectedly low in macrophages since those are T-cell and proinflammatory signatures.
+
+## Per-sample and Per-celltype Summaries
+
+```{r m2ts_by_sample, warning=FALSE, message=FALSE}
+
+##############################
+###    SUMMARY STATS       ###
+##############################
+
+m2_cells <- subset(macrophages, m2_flag == "CD68+CD163+")
+
+m2ts_by_sample <- m2_cells@meta.data |>
+  group_by(sample) |>
+  summarise(
+    n_m2_cells = n(),
+    mean_m2ts = mean(M2TS1),
+    median_m2ts = median(M2TS1),
+    .groups = "drop"
+  )
+
+write.csv(m2ts_by_sample, "tables/m2ts_summary_by_sample.csv", row.names = FALSE)
+m2ts_by_sample
+```
+
+M2TS varies across patients -- P7 and P8 have the highest scores, P2 the lowest. This inter-patient heterogeneity is what the paper used to stratify patients into M2TS-high vs M2TS-low groups.
+
+```{r m2ts_by_celltype, warning=FALSE, message=FALSE}
+
+# Scoring all cells for cross-compartment comparison
+merged <- AddModuleScore(merged, features = list(m2ts_genes), name = "M2TS")
+merged <- AddModuleScore(merged, features = list(m1ts_genes), name = "M1TS")
+merged <- AddModuleScore(merged, features = list(ctlts_genes), name = "CTLTS")
+
+m2ts_by_celltype <- merged@meta.data |>
+  group_by(compartment) |>
+  summarise(
+    n_cells = n(),
+    mean_m2ts = mean(M2TS1),
+    mean_m1ts = mean(M1TS1),
+    mean_ctlts = mean(CTLTS1),
+    .groups = "drop"
+  )
+
+write.csv(m2ts_by_celltype, "tables/m2ts_summary_by_celltype.csv", row.names = FALSE)
+m2ts_by_celltype
+```
+
+Signatures land where expected: M2TS highest in myeloid, CTLTS highest in T/NK, M1TS slightly elevated in T/NK and B cells. Good sanity check.
+
+## Azimuth Reference Mapping
+
+Using the Azimuth PBMC reference to validate marker-based annotation and get finer-grained immune subtypes. These labels get saved into the merged object so Part 2 (CellChat) can use them directly.
+
+```{r azimuth_mapping, warning=FALSE, message=FALSE}
+
+##############################
+###   AZIMUTH MAPPING      ###
+##############################
+
+library(Azimuth)
+
+immune <- subset(merged, compartment %in% c("Myeloid", "T/NK", "B cell", "Plasma"))
+immune <- RunAzimuth(immune, reference = "pbmcref")
+
+table(immune$predicted.celltype.l1)
+table(immune$predicted.celltype.l2)
+```
+
+Azimuth breaks the myeloid compartment into CD14 Mono (21.6k), CD16 Mono (5.4k), and cDC2 (3k). T cells resolve into CD4 TCM, CD8 TEM, MAIT, gdT, and Treg subsets -- exactly the granularity needed for CellChat.
+
+```{r azimuth_validation, warning=FALSE, message=FALSE}
+
+# Cross-tabulating marker-based vs Azimuth labels
+cross_tab <- table(
+  marker = immune$compartment,
+  azimuth = immune$predicted.celltype.l1
+)
+cross_tab
+
+write.csv(as.data.frame.matrix(cross_tab), "tables/marker_vs_azimuth_table.csv")
+```
+
+Strong concordance: Myeloid maps 97% to Mono, B cells 98% to B. The main discrepancy is ~2600 cells we called T/NK that Azimuth labels DC -- likely pDCs or mixed-phenotype cells at the T/myeloid boundary.
+
+```{r save_final, warning=FALSE, message=FALSE}
+
+# Transferring Azimuth labels back to the full merged object
+merged$azimuth_l1 <- NA
+merged$azimuth_l2 <- NA
+overlap <- intersect(Cells(immune), Cells(merged))
+merged$azimuth_l1[match(overlap, Cells(merged))] <- immune$predicted.celltype.l1[match(overlap, Cells(immune))]
+merged$azimuth_l2[match(overlap, Cells(merged))] <- immune$predicted.celltype.l2[match(overlap, Cells(immune))]
+
+# Saving with all annotations (compartment + Azimuth) for Part 2
+saveRDS(merged, "data_processed/gse228598_harmony.rds")
+```
