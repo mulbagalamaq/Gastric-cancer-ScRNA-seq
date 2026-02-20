@@ -11,7 +11,10 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
-knitr::opts_knit$set(root.dir = normalizePath(".."))
+
+# Ensure we're in project root whether knitting or running interactively
+if (basename(getwd()) == "scripts") setwd("..")
+knitr::opts_knit$set(root.dir = getwd())
 ```
 
 ## Setup
@@ -36,7 +39,7 @@ merged <- readRDS("data_processed/gse228598_harmony.rds")
 
 ## Cell Labels for CellChat
 
-Collapsing Azimuth L2 subtypes into ~10 groups for CellChat. Compartment and Azimuth labels were already assigned in Part 1.
+CellChat needs discrete groups, so collapsing Azimuth L2 subtypes into broader categories. Immune cells get Azimuth labels, non-immune keep their compartment name.
 
 ```{r cell_labels, warning=FALSE, message=FALSE}
 
@@ -45,6 +48,7 @@ Collapsing Azimuth L2 subtypes into ~10 groups for CellChat. Compartment and Azi
 ##############################
 
 # Mapping Azimuth L2 subtypes to CellChat groups
+# could do finer resolution here but 10 groups is enough for pathway-level analysis
 label_map <- c(
   "CD14 Mono" = "CD14 Mono", "CD16 Mono" = "CD16 Mono",
   "cDC1" = "cDC", "cDC2" = "cDC", "pDC" = "cDC",
@@ -76,7 +80,7 @@ gc()
 
 ## CellChat Inference
 
-Using the full human ligand-receptor database with triMean averaging -- more conservative than other methods, fewer false positives.
+Running CellChat with triMean -- stricter than truncatedMean, so fewer false positives but might miss some weaker signals.
 
 ```{r cellchat_inference, warning=FALSE, message=FALSE}
 
@@ -84,6 +88,8 @@ Using the full human ligand-receptor database with triMean averaging -- more con
 ###   CELLCHAT INFERENCE   ###
 ##############################
 
+# triMean is more conservative, which seems appropriate for an exploratory analysis
+# could try truncatedMean later to see if we're missing anything
 obj <- JoinLayers(obj)
 cellchat <- createCellChat(obj, group.by = "cellchat_label")
 
@@ -123,11 +129,34 @@ netVisual_circle(cellchat@net$weight, vertex.weight = table(cellchat@idents),
 title("Interaction strength")
 ```
 
-CD14 monocytes are the dominant signaling hub -- most connected and strongest interaction weight. Consistent with the M2-dominant macrophage phenotype driving the peritoneal microenvironment.
+CD14 monocytes are the most connected cell type here -- thickest edges both for number and strength. Makes sense given they're the biggest myeloid population and we already saw them skewing M2 in Part 1.
+
+## Signaling Pathway Ranking
+
+Looking at all significant pathways ranked by information flow before picking out the immunosuppressive ones.
+
+```{r pathway_ranking, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+
+##############################
+###   PATHWAY RANKING      ###
+##############################
+
+# rankNet gives a nice overview of what's actually active
+gg <- rankNet(cellchat, mode = "single", stacked = TRUE, do.stat = TRUE)
+gg
+ggsave("figures/cellchat_pathway_ranking.png", gg, width = 10, height = 6)
+```
+
+```{r active_pathways, warning=FALSE, message=FALSE}
+
+# what pathways actually made it through
+cat("Total active pathways:", length(cellchat@netP$pathways), "\n")
+cat(paste(cellchat@netP$pathways, collapse = ", "), "\n")
+```
 
 ## Immunosuppressive Pathway Networks
 
-Focusing on pathways relevant to macrophage-mediated immunosuppression: MIF, SPP1 (osteopontin), GALECTIN (immune checkpoint), COMPLEMENT, CCL (chemokine recruitment), and FN1 (an M2TS signature gene from Sullivan et al.).
+Focusing on six pathways tied to macrophage-mediated immunosuppression: MIF, SPP1, GALECTIN, COMPLEMENT, CCL, and FN1. FN1 is included because it's one of the M2TS signature genes from Sullivan et al.
 
 ```{r immuno_networks, warning=FALSE, message=FALSE, fig.width=14, fig.height=10}
 
@@ -138,7 +167,7 @@ Focusing on pathways relevant to macrophage-mediated immunosuppression: MIF, SPP
 
 immuno_paths <- c("MIF", "SPP1", "GALECTIN", "COMPLEMENT", "CCL", "FN1")
 
-# Filtering to pathways that reached significance in this run
+# not all of these necessarily reach significance in every run
 active_paths <- cellchat@netP$pathways
 immuno_paths <- immuno_paths[immuno_paths %in% active_paths]
 cat("Active immunosuppressive pathways:", paste(immuno_paths, collapse = ", "), "\n")
@@ -161,7 +190,7 @@ for (p in immuno_paths) {
 dev.off()
 ```
 
-MIF is broadly sent by epithelial and mesothelial cells -- the tumor/stromal compartment actively promotes immunosuppression. SPP1 and GALECTIN are dominated by CD14/CD16 monocytes targeting T cells and DCs. FN1 from CD14 monocytes broadcasts to all cell types, connecting Sullivan et al.'s prognostic signature to a functional signaling mechanism.
+A few things jump out from the circle plots. MIF signaling comes mostly from mesothelial cells -- they're the dominant sender there, with epithelial contributing some but less. SPP1 and GALECTIN are monocyte-driven, targeting T cells and DCs. FN1 from CD14 monocytes goes out to basically everything, which is interesting because it connects Sullivan's prognostic signature to actual intercellular communication.
 
 ## Sender-Receiver Heatmap
 
@@ -175,11 +204,11 @@ MIF is broadly sent by epithelial and mesothelial cells -- the tumor/stromal com
 netAnalysis_signalingRole_heatmap(cellchat, signaling = immuno_paths, width = 10, height = 6)
 ```
 
-CD14/CD16 monocytes are the dominant outgoing senders for SPP1, GALECTIN, and FN1. Epithelial and mesothelial cells drive MIF and COMPLEMENT. Both tumor cells and immunosuppressive macrophages converge to shut down anti-tumor immunity through complementary pathways.
+The heatmap confirms the pattern -- CD14/CD16 monocytes light up as senders for SPP1, GALECTIN, and FN1, while mesothelial cells are the main MIF and COMPLEMENT source. So you've got two separate compartments (myeloid and stromal) both pushing immunosuppression through different pathways. Whether that's coordinated or just convergent isn't clear from this data alone.
 
 ## Ligand-Receptor Interactions
 
-Specific molecular interactions from myeloid/tumor cells targeting immune effectors.
+Drilling into specific L-R pairs from myeloid and epithelial sources targeting immune effectors.
 
 ```{r bubble_plot, warning=FALSE, message=FALSE, fig.width=12, fig.height=8}
 
@@ -188,6 +217,7 @@ Specific molecular interactions from myeloid/tumor cells targeting immune effect
 ###   BUBBLE PLOT          ###
 ##############################
 
+# sources: myeloid + epithelial; targets: lymphocytes + DCs
 p <- netVisual_bubble(cellchat,
   sources.use = c("CD14 Mono", "CD16 Mono", "Epithelial"),
   targets.use = c("CD4 T", "CD8 T", "NK", "cDC"),
@@ -197,7 +227,7 @@ p
 ggsave("figures/cellchat_bubble_immunosuppressive.png", p, width = 12, height = 8)
 ```
 
-LGALS9 (galectin-9) engaging HAVCR2 (TIM-3) on T cells is the key immune exhaustion axis -- monocytes are directly driving T cell dysfunction through this checkpoint. FN1->CD44 from monocytes links the M2TS prognostic signature to a functional cell-cell communication mechanism. MIF->CD74/CD44 from epithelial cells suppresses cDC antigen presentation.
+The bubble plot shows a few strong axes. MIF->CD74 from epithelial cells to cDCs has high probability -- potentially dampening antigen presentation. GALECTIN signaling has multiple L-R pairs active (LGALS9-HAVCR2 is there but it's not the strongest one -- the galectin-CD44 and galectin-PTPRK pairs are comparable or bigger). FN1->CD44 from monocytes is prominent, tying the M2 signature gene to a functional signaling output.
 
 ## Top Interactions by Probability
 
@@ -207,10 +237,13 @@ LGALS9 (galectin-9) engaging HAVCR2 (TIM-3) on T cells is the key immune exhaust
 ###   TOP INTERACTIONS     ###
 ##############################
 
+# TODO: might be worth looking at target-side only (just T cells) to see what
+# they're receiving from all sources
+
 df <- subsetCommunication(cellchat, signaling = immuno_paths)
 write.csv(df, "tables/cellchat_immunosuppressive_interactions.csv", row.names = FALSE)
 cat(nrow(df), "interactions exported\n")
 head(df[order(-df$prob), ], 15)
 ```
 
-FN1->CD44 is the strongest interaction in the immunosuppressive network, driven by CD16 monocytes targeting epithelial cells. Complement (C3->ITGAM/C3AR1) from mesothelial cells to monocytes is the second axis -- the peritoneal lining actively recruits and activates immunosuppressive macrophages. MIF signaling from mesothelial cells to monocytes and cDCs completes the picture: the entire peritoneal microenvironment is wired for immunosuppression.
+FN1->CD44 from monocytes and complement signaling (C3-related) from mesothelial cells dominate the top of the list. MIF from mesothelial cells to monocytes and cDCs is up there too. The overall picture is that the peritoneal stroma (mesothelial cells mainly) is feeding into myeloid-driven suppression -- mesothelial cells recruit and activate monocytes via MIF and complement, and then monocytes do the heavy lifting of suppressing T cells through galectin and SPP1. Not sure if that's a general ascites thing or specific to gastric cancer peritoneal metastasis.

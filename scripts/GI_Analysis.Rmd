@@ -11,7 +11,10 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
-knitr::opts_knit$set(root.dir = normalizePath(".."))
+
+# Ensure we're in project root whether knitting or running interactively
+if (basename(getwd()) == "scripts") setwd("..")
+knitr::opts_knit$set(root.dir = getwd())
 ```
 
 ## Setup
@@ -61,15 +64,19 @@ Downloading the 10x matrices for GSE228598 from GEO. 10 of the 28 samples from t
 ##############################
 
 geo_dir <- "data/geo"
+dir.create(geo_dir, recursive = TRUE, showWarnings = FALSE)
+
 supp_url <- "https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE228598&format=file"
 tar_file <- file.path(geo_dir, "GSE228598_RAW.tar")
 
-if (!file.exists(tar_file)) {
+# Only download if tar doesn't exist and no gz files present
+gz_present <- length(list.files(geo_dir, pattern = "\\.gz$")) > 0
+if (!file.exists(tar_file) && !gz_present) {
   download.file(supp_url, tar_file, mode = "wb")
 }
 
-extracted <- list.files(geo_dir, pattern = "\\.gz$")
-if (length(extracted) == 0) {
+# Only extract if no gz files present
+if (!gz_present) {
   untar(tar_file, exdir = geo_dir)
 }
 ```
@@ -129,7 +136,17 @@ VlnPlot(merged, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-nCount has extreme outliers (max ~187M UMIs) that affect the violin. Capping at 50k to see the real distribution:
+```{r qc_scatter, warning=FALSE, message=FALSE, fig.width=12, fig.height=4}
+
+# QC scatter plots
+p1 <- FeatureScatter(merged, feature1 = "nCount_RNA", feature2 = "nFeature_RNA",
+                     group.by = "sample", pt.size = 0.1) + NoLegend()
+p2 <- FeatureScatter(merged, feature1 = "nCount_RNA", feature2 = "percent.mt",
+                     group.by = "sample", pt.size = 0.1) + NoLegend()
+p1 + p2
+```
+
+nCount has extreme outliers that squash the violin. The scatter shows most cells cluster in a tight nCount/nFeature band with a few high-mito stragglers. Standard cutoffs below.
 
 ```{r qc_violin_capped, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
 
@@ -138,8 +155,6 @@ VlnPlot(merged, features = "nCount_RNA", group.by = "sample", pt.size = 0) +
   ylim(0, 50000) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
-
-Bulk of cells sit between 1k-10k UMIs with reasonable mito fractions. Applying standard cutoffs:
 
 ```{r qc_filter, warning=FALSE, message=FALSE}
 
@@ -155,7 +170,7 @@ table(merged$sample)
 
 ## Doublet Removal
 
-Running scDblFinder per sample. Peritoneal fluid loaded at standard 10x density should give ~5-10% doublet rates.
+Running scDblFinder per sample.
 
 ```{r doublet_removal, warning=FALSE, message=FALSE}
 
@@ -179,6 +194,8 @@ rm(sce)
 gc()
 ```
 
+~8% doublet rate across samples, about what you'd expect for standard 10x loading density.
+
 ## Normalize and Integrate
 
 Using LogNormalize + Harmony for batch correction across the 10 patient samples.
@@ -200,6 +217,17 @@ merged <- NormalizeData(merged)
 merged <- FindVariableFeatures(merged, nfeatures = 2000)
 merged <- ScaleData(merged)
 merged <- RunPCA(merged, verbose = FALSE)
+```
+
+```{r elbow_plot, warning=FALSE, message=FALSE, fig.width=6, fig.height=4}
+
+# Elbow plot for PC selection
+ElbowPlot(merged, ndims = 40)
+```
+
+Elbow flattens around PC 25-30, going with 30.
+
+```{r harmony_integration, warning=FALSE, message=FALSE}
 
 # Harmony batch correction
 merged <- RunHarmony(merged, group.by.vars = "sample", reduction = "pca", reduction.save = "harmony")
@@ -222,7 +250,7 @@ Samples mix well in the central mass, Harmony did its job like always, long live
 
 ## Broad Compartment Annotation
 
-Assigning clusters to compartments using  canonical marker expression.
+Assigning clusters to compartments using canonical marker expression.
 
 ```{r marker_dotplot, warning=FALSE, message=FALSE, fig.width=12, fig.height=5}
 
@@ -245,6 +273,26 @@ broad_markers <- c(
 DotPlot(merged, features = broad_markers, cluster.idents = TRUE) +
   RotatedAxis()
 ```
+
+```{r cluster_markers, warning=FALSE, message=FALSE}
+
+# DEGs per cluster to back up the compartment calls
+markers <- FindAllMarkers(merged, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.5)
+write.csv(markers, "tables/cluster_markers_all.csv", row.names = FALSE)
+```
+
+```{r cluster_heatmap, warning=FALSE, message=FALSE, fig.width=16, fig.height=8}
+
+# Top 2 markers per cluster
+top2 <- markers %>% group_by(cluster) %>% slice_max(avg_log2FC, n = 2)
+
+DoHeatmap(merged, features = top2$gene, size = 3, cells = WhichCells(merged, downsample = 100)) +
+  NoLegend() +
+  theme(axis.text.y = element_text(size = 7))
+ggsave("figures/heatmap_cluster_markers.png", width = 16, height = 8)
+```
+
+Clusters separate cleanly into the expected lineages. Myeloid clusters (0, 1, 3, 4, 8, 12, 14, 22) light up for LYZ/CD14/CD68. T/NK clusters have CD3D/NKG7. Epithelial clusters express keratins. Cluster 14 is a bit ambiguous -- could be pDC or activated monocytes, but grouping with myeloid for now.
 
 ```{r assign_compartments, warning=FALSE, message=FALSE}
 
@@ -269,7 +317,7 @@ DimPlot(merged, group.by = "compartment", label = TRUE) + NoLegend()
 ggsave("figures/umap_broad_compartments.png", width = 6, height = 5)
 ```
 
-Myeloid cells dominate (~57%), consistent with peritoneal fluid being macrophage-rich. T/NK is the second largest population (~34%). Epithelial and mesothelial are minor components, mostly patient-specific.
+Myeloid dominant, T/NK second. Epithelial and mesothelial are mostly patient-specific as expected for peritoneal fluid.
 
 ```{r export_counts, warning=FALSE, message=FALSE}
 
@@ -297,6 +345,7 @@ macrophages <- RunPCA(macrophages, verbose = FALSE)
 macrophages <- RunHarmony(macrophages, group.by.vars = "sample", reduction = "pca", reduction.save = "harmony")
 macrophages <- RunUMAP(macrophages, reduction = "harmony", dims = 1:20, verbose = FALSE)
 macrophages <- FindNeighbors(macrophages, reduction = "harmony", dims = 1:20, verbose = FALSE)
+# tried res 0.4 and 0.8 too, 0.6 gives cleanest separation
 macrophages <- FindClusters(macrophages, resolution = 0.6, verbose = FALSE)
 
 # Flagging CD68+CD163+ M2 macrophages
@@ -314,7 +363,7 @@ p2 <- DimPlot(macrophages, group.by = "m2_flag") + ggtitle("CD68+CD163+ M2")
 p1 + p2
 ```
 
-~56% of myeloid cells are CD68+CD163+. They show spatial structure on the UMAP rather than random scattering -- consistent with the paper's finding that M2 polarization exists as a continuum, not a binary state.
+Over half the myeloid cells are CD68+CD163+. They cluster together on the UMAP rather than scattering randomly, which suggests M2 polarization is a real transcriptional state here, not just noise from dropout.
 
 ## Module Scores
 
@@ -347,7 +396,14 @@ VlnPlot(macrophages, features = "M2TS1", group.by = "m2_flag", pt.size = 0) +
 ggsave("figures/violin_m2ts_by_m2flag.png", width = 6, height = 4)
 ```
 
-M2TS is enriched in CD68+CD163+ cells relative to other myeloid cells, replicating the paper's core finding (their Figure 3A). M1TS and CTLTS are expectedly low in macrophages since those are T-cell and proinflammatory signatures.
+```{r m2ts_wilcox, warning=FALSE, message=FALSE}
+
+# Statistical test for M2TS enrichment
+wt <- wilcox.test(M2TS1 ~ m2_flag, data = macrophages@meta.data)
+cat("Wilcoxon rank-sum test: W =", wt$statistic, ", p =", format.pval(wt$p.value, digits = 3), "\n")
+```
+
+M2TS tracks with the CD68+CD163+ phenotype as expected (Wilcoxon p < 2.2e-16). This replicates the paper's core finding from their Figure 3A. M1TS and CTLTS are low in macrophages which makes sense since those are T-cell signatures.
 
 ## Per-sample and Per-celltype Summaries
 
@@ -372,7 +428,7 @@ write.csv(m2ts_by_sample, "tables/m2ts_summary_by_sample.csv", row.names = FALSE
 m2ts_by_sample
 ```
 
-M2TS varies across patients -- P7 and P8 have the highest scores, P2 the lowest. This inter-patient heterogeneity is what the paper used to stratify patients into M2TS-high vs M2TS-low groups.
+M2TS varies a lot across patients. P7 and P8 are the highest, P2 is the lowest. The paper used this kind of inter-patient heterogeneity to stratify into M2TS-high vs M2TS-low groups.
 
 ```{r m2ts_by_celltype, warning=FALSE, message=FALSE}
 
@@ -395,11 +451,11 @@ write.csv(m2ts_by_celltype, "tables/m2ts_summary_by_celltype.csv", row.names = F
 m2ts_by_celltype
 ```
 
-Signatures land where expected: M2TS highest in myeloid, CTLTS highest in T/NK, M1TS slightly elevated in T/NK and B cells. Good sanity check.
+Signatures land where they should -- M2TS highest in myeloid, CTLTS highest in T/NK. Sanity check passed.
 
 ## Azimuth Reference Mapping
 
-Using the Azimuth PBMC reference to validate marker-based annotation and get finer-grained immune subtypes. These labels get saved into the merged object so Part 2 (CellChat) can use them directly.
+Using the Azimuth PBMC reference to validate marker-based annotation and get finer-grained immune subtypes. These labels get saved so Part 2 can use them for CellChat.
 
 ```{r azimuth_mapping, warning=FALSE, message=FALSE}
 
@@ -416,7 +472,7 @@ table(immune$predicted.celltype.l1)
 table(immune$predicted.celltype.l2)
 ```
 
-Azimuth breaks the myeloid compartment into CD14 Mono (21.6k), CD16 Mono (5.4k), and cDC2 (3k). T cells resolve into CD4 TCM, CD8 TEM, MAIT, gdT, and Treg subsets -- exactly the granularity needed for CellChat.
+Azimuth breaks the myeloid compartment into mostly CD14 Mono and CD16 Mono with a smaller cDC population. T cells resolve into CD4 TCM, CD8 TEM, MAIT, gdT, Treg subsets -- good granularity for CellChat.
 
 ```{r azimuth_validation, warning=FALSE, message=FALSE}
 
@@ -430,7 +486,7 @@ cross_tab
 write.csv(as.data.frame.matrix(cross_tab), "tables/marker_vs_azimuth_table.csv")
 ```
 
-Strong concordance: Myeloid maps 97% to Mono, B cells 98% to B. The main discrepancy is ~2600 cells we called T/NK that Azimuth labels DC -- likely pDCs or mixed-phenotype cells at the T/myeloid boundary.
+Strong concordance overall. Myeloid maps almost entirely to Mono, B cells map cleanly to B. The main discrepancy is a chunk of our T/NK cells that Azimuth calls DC -- probably pDCs sitting at the boundary. Not worrying about it for now.
 
 ```{r save_final, warning=FALSE, message=FALSE}
 
