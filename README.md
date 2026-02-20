@@ -1,6 +1,6 @@
 # Gastric Cancer Peritoneal Fluid scRNA-seq
 
-Reproducing and extending the scRNA-seq analysis from [Sullivan et al. 2024](https://doi.org/10.1038/s41467-024-47683-4) (PMID 38612926) on macrophage gene signatures in gastric cancer malignant ascites.
+Reproducing and extending the scRNA-seq analysis from [Sullivan et al. 2024](https://pmc.ncbi.nlm.nih.gov/articles/PMC11012629/) on macrophage gene signatures in gastric cancer malignant ascites.
 
 ## Data
 
