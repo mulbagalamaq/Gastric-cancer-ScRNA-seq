@@ -1,0 +1,136 @@
+---                                                                                                           
+title: "Gastric Cancer - malignant ascites study"
+subtitle: "GSE228598 scRNA-seq Analysis Part 2 - CellChat
+author: "Aymen Maqsood"
+date: "2026-02-19"                     
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+#Setup
+
+library(Seurat)
+library(CellChat)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+set.seed(1)
+
+merged <- readRDS("data_processed/gse228598_harmony.rds")
+
+
+```
+
+```{r}
+                                         
+library(Azimuth)                                                                                                                                                 
+
+compartment_map <- c(
+  "0" = "Myeloid", "1" = "Myeloid", "3" = "Myeloid", "4" = "Myeloid",
+  "8" = "Myeloid", "12" = "Myeloid", "14" = "Myeloid", "22" = "Myeloid",
+  "2" = "T/NK", "5" = "T/NK", "6" = "T/NK", "7" = "T/NK",
+  "9" = "T/NK", "17" = "T/NK", "18" = "T/NK", "19" = "T/NK", "21" = "T/NK",
+  "11" = "B cell", "15" = "Plasma",
+  "13" = "Epithelial", "16" = "Epithelial", "20" = "Epithelial",
+  "10" = "Mesothelial", "23" = "Mesothelial"
+)
+merged$compartment <- unname(compartment_map[as.character(merged$seurat_clusters)])
+
+immune <- subset(merged, compartment %in% c("Myeloid", "T/NK", "B cell", "Plasma"))
+immune <- RunAzimuth(immune, reference = "pbmcref")
+
+label_map <- c(
+  "CD14 Mono" = "CD14 Mono", "CD16 Mono" = "CD16 Mono",
+  "cDC1" = "cDC", "cDC2" = "cDC", "pDC" = "cDC",
+  "CD4 CTL" = "CD4 T", "CD4 Naive" = "CD4 T", "CD4 Proliferating" = "CD4 T",
+  "CD4 TCM" = "CD4 T", "CD4 TEM" = "CD4 T", "Treg" = "CD4 T",
+  "CD8 Naive" = "CD8 T", "CD8 Proliferating" = "CD8 T",
+  "CD8 TCM" = "CD8 T", "CD8 TEM" = "CD8 T",
+  "MAIT" = "CD8 T", "dnT" = "CD8 T", "gdT" = "CD8 T",
+  "NK" = "NK", "NK Proliferating" = "NK", "NK_CD56bright" = "NK",
+  "B intermediate" = "B cell", "B memory" = "B cell", "B naive" = "B cell",
+  "Plasmablast" = "Plasma"
+)
+
+immune$cellchat_label <- unname(label_map[immune$predicted.celltype.l2])
+
+non_immune <- subset(merged, compartment %in% c("Epithelial", "Mesothelial"))
+non_immune$cellchat_label <- non_immune$compartment
+
+obj <- merge(immune, non_immune)
+obj <- subset(obj, !is.na(cellchat_label))
+
+table(obj$cellchat_label)
+
+rm(immune, non_immune)
+gc()
+
+
+```
+
+
+# Cell Chat 
+```{r}
+# Create CellChat object                                                                                                                                           
+rm(merged)                                                                                                                                                       
+gc()                                                                                                                                                             
+
+obj <- JoinLayers(obj)
+cellchat <- createCellChat(obj, group.by = "cellchat_label")
+
+CellChatDB <- CellChatDB.human
+cellchat@DB <- CellChatDB
+
+cellchat <- subsetData(cellchat)
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+cellchat <- computeCommunProb(cellchat, type = "triMean")
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+cellchat <- computeCommunProbPathway(cellchat)
+cellchat <- aggregateNet(cellchat)
+
+saveRDS(cellchat, "data_processed/cellchat_object.rds")
+```
+
+
+```{r, fig.width=10, fig.height=5}                                                                                                                                 
+par(mfrow = c(1, 2))                                                                                                                                               
+netVisual_circle(cellchat@net$count, vertex.weight = table(cellchat@idents),                                                                                       
+                 vertex.label.cex = 0.7, edge.width.max = 10)
+title("Number of interactions")
+netVisual_circle(cellchat@net$weight, vertex.weight = table(cellchat@idents),
+                 vertex.label.cex = 0.7, edge.width.max = 10)
+title("Interaction strength")
+
+
+```
+
+
+```{r}
+#Immunosuppressive signaling
+
+pathways_of_interest <- c("IL6", "IL8", "CSF1", "CXCL", "CCL", "MHC-II", "CD86", "GALECTIN", "SPP1", "COMPLEMENT")
+active_pathways <- cellchat@netP$pathways
+
+hits <- intersect(pathways_of_interest, active_pathways)
+cat("Found pathways:", paste(hits, collapse = ", "), "\n")
+cat("All active pathways:\n")
+print(active_pathways)
+```
+
+# Key immunosuppressive pathway networks
+
+
+```{r, fig.width=14, fig.height=10}
+immuno_paths <- c("MIF", "SPP1", "GALECTIN", "COMPLEMENT", "CCL", "FN1")
+
+par(mfrow = c(2, 3))
+for (p in immuno_paths) {
+  netVisual_aggregate(cellchat, signaling = p, layout = "circle",
+                      vertex.label.cex = 0.6, edge.width.max = 8)
+  title(p)
+}
+
+
